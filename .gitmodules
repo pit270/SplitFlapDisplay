@@ -1,6 +1,6 @@
 [submodule "pca9685"]
-	path = pca9685
+	path = Arduino/pca9685
 	url = https://github.com/Reinbert/pca9685.git
 [submodule "WiringPi"]
-	path = WiringPi
+	path = RaspberryPi/WiringPi
 	url = https://github.com/WiringPi/WiringPi.git
