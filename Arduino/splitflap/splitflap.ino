@@ -31,24 +31,28 @@
 
 // Servos
 // pulse lengths out of 4096
-#define SERVO_ON_PULSE_LENGTH 250
+#define SERVO_ON_PULSE_LENGTH_FAST 364
+#define SERVO_ON_PULSE_LENGTH_SLOW 321
 #define SERVO_OFF_PULSE_LENGTH 307
-#define SERVO_RPM 110L // todo: calibrate this. May  need to calibrate for each servo
+#define SERVO_RPM_FAST 63.83f // todo: calibrate this. May  need to calibrate for each servo
+#define SERVO_RPM_SLOW 41.0f
 // how far does servo move when on, measured in counts per loop
-#define SERVO_DELTA_OMEGA SERVO_RPM * LOOP_TIME * COUNTS_PER_REV / 60000 
+#define SERVO_DELTA_OMEGA_FAST (unsigned int)(SERVO_RPM_FAST * LOOP_TIME * COUNTS_PER_REV / 60000)
+#define SERVO_DELTA_OMEGA_SLOW (unsigned int)(SERVO_RPM_SLOW * LOOP_TIME * COUNTS_PER_REV / 60000)
+#define SERVO_DELTA_OMEGA(x) (unsigned int)(x * LOOP_TIME * COUNTS_PER_REV / 60000)
 
 // Hall Effect Sensors
-#define HE_TRIGGER_VOLTAGE 2.5 // TODO: calibrate this. What voltage to use to detect HE falling edge
+#define HE_TRIGGER_VOLTAGE 512 // TODO: calibrate this. What voltage to use to detect HE falling edge
 
 
 // Structs
 typedef struct
 {
-    unsigned int adcID;             // which ADC is the HE connected to
+    int adcID;                      // which ADC is the HE connected to. -1: Arduino built in
     unsigned int adcPin;            // which pin of the ADC is this HE connected to
     unsigned int HEPositionOffset;  // offset in counts for where HE and magnet cross relative to defined zero position (such as A or blank flap)
-    float last_value;
-    float value;
+    unsigned int last_value;
+    unsigned int value;
 } HallEffect;
 
 typedef struct
@@ -56,7 +60,8 @@ typedef struct
     unsigned int pwmPin;            // which pwm pin this servo is connected to
     unsigned int position;          // position mod COUNTS_PER_REV
     unsigned int targetPosition;
-    bool isOn;
+    unsigned int state;             // 0=off, 1=slow, 2=fast
+    float targetRPM;
 } Servo;
 
 typedef struct
@@ -67,18 +72,18 @@ typedef struct
 
 SFModule sfModules[NUM_MODULES] = 
 {
-    {{0, 0, 0, 0.0f, 0.0f}, {0, 0, 0, 0}},       // {HE{adcID, adcPin, offset, 0, 0}, Servo{pwmPin, 0, 0, 0}}
-    {{0, 1, 0, 0.0f, 0.0f}, {1, 0, 0, 0}},
-    {{0, 2, 0, 0.0f, 0.0f}, {2, 0, 0, 0}},
-    {{0, 3, 0, 0.0f, 0.0f}, {3, 0, 0, 0}},
-    {{0, 4, 0, 0.0f, 0.0f}, {4, 0, 0, 0}},
-    {{0, 5, 0, 0.0f, 0.0f}, {5, 0, 0, 0}},
-    {{0, 6, 0, 0.0f, 0.0f}, {6, 0, 0, 0}},
-    {{0, 7, 0, 0.0f, 0.0f}, {7, 0, 0, 0}},
-    {{1, 0, 0, 0.0f, 0.0f}, {8, 0, 0, 0}},
-    {{1, 1, 0, 0.0f, 0.0f}, {9, 0, 0, 0}},
-    {{1, 2, 0, 0.0f, 0.0f}, {10, 0, 0, 0}},
-    {{1, 3, 0, 0.0f, 0.0f}, {11, 0, 0, 0}},
+    {{-1, 0, 0, 0.0f, 0.0f}, {0, 0, 0, 0, 0}},       // {HE{adcID, adcPin, offset, 0, 0}, Servo{pwmPin, 0, 0, 0}}
+    {{0, 1, 0, 0.0f, 0.0f}, {1, 0, 0, 0, 0}},
+    {{0, 2, 0, 0.0f, 0.0f}, {2, 0, 0, 0, 0}},
+    {{0, 3, 0, 0.0f, 0.0f}, {3, 0, 0, 0, 0}},
+    {{0, 4, 0, 0.0f, 0.0f}, {4, 0, 0, 0, 0}},
+    {{0, 5, 0, 0.0f, 0.0f}, {5, 0, 0, 0, 0}},
+    {{0, 6, 0, 0.0f, 0.0f}, {6, 0, 0, 0, 0}},
+    {{0, 7, 0, 0.0f, 0.0f}, {7, 0, 0, 0, 0}},
+    {{1, 0, 0, 0.0f, 0.0f}, {8, 0, 0, 0, 0}},
+    {{1, 1, 0, 0.0f, 0.0f}, {9, 0, 0, 0, 0}},
+    {{1, 2, 0, 0.0f, 0.0f}, {10, 0, 0, 0, 0}},
+    {{1, 3, 0, 0.0f, 0.0f}, {11, 0, 0, 0, 0}},
 };
 
 
@@ -91,9 +96,18 @@ bool newMessageReceived = false;
 int debug = 0;
 
 // Function Definitions
+int calculatePWM(float rpm)
+{
+  return ((SERVO_ON_PULSE_LENGTH_FAST - SERVO_ON_PULSE_LENGTH_SLOW) / (SERVO_RPM_FAST - SERVO_RPM_SLOW)) * (rpm - SERVO_RPM_SLOW) + SERVO_ON_PULSE_LENGTH_SLOW;
+}
 
-// TODO: ADC read
-float ADC_Read(unsigned int adcId, unsigned int adcPin) {
+
+int ADC_Read(unsigned int adcId, unsigned int adcPin) {
+  if(adcId == -1)
+  {
+    return analogRead(adcPin);
+  }
+  // TODO: 3008 read
   return 0.0;
 }
 
@@ -107,7 +121,7 @@ void update() {
             // assuming blank flap is at position 0, target postion is cacluated as follows
             sfModules[i].servo.targetPosition = message[i] * COUNTS_PER_FLAP;
         }
-        // newMessageReceived = false;
+        newMessageReceived = false;
     }
 
     for(int i = 0; i < NUM_MODULES; ++i)
@@ -121,33 +135,53 @@ void update() {
         {
             // stop servo
             // to avoid sending too many unneccesary i2c messages, only send if servo is not already off
-            if(sfm->servo.isOn)
+            if(sfm->servo.state > 0)
             {
                 // printf("stopping servo %d\n", i);
                 // pwmWrite(PWM_PIN(sfm->servo.pwmPin), SERVO_OFF_PULSE_WIDTH);
                 interrupts();
                 pwm.setPin(sfm->servo.pwmPin, 0);
                 noInterrupts();
-                sfm->servo.isOn = false;
+                sfm->servo.state = 0;
+                sfm->servo.targetRPM = 0;
             }
+        }
+        else if((sfm->servo.targetPosition - sfm->servo.position) % COUNTS_PER_REV < COUNTS_PER_FLAP * 8)
+        {
+          sfm->servo.targetRPM -= 0.5;
+          if(sfm->servo.targetRPM < SERVO_RPM_SLOW)
+          {
+            sfm->servo.targetRPM = SERVO_RPM_SLOW;
+          }
+          if(sfm->servo.state != 1)
+          {
+            interrupts();
+            pwm.setPin(sfm->servo.pwmPin, calculatePWM(sfm->servo.targetRPM));
+            noInterrupts();
+            sfm->servo.state = 1;
+          }
+          else
+          {
+            sfm->servo.position = (sfm->servo.position + SERVO_DELTA_OMEGA(sfm->servo.targetRPM)) % COUNTS_PER_REV;
+          }
         }
         else
         {
             // to avoid sending too many unneccesary i2c messages, only send if servo is not already on
-            if(!(sfm->servo.isOn))
+            if(sfm->servo.state < 2)
             {
                 // move servo
                 // printf("moving servo %d\n", i);
                 // pwmWrite(PWM_PIN(sfm->servo.pwmPin), SERVO_ON_PULSE_WIDTH);
                 interrupts();
-                pwm.setPin(sfm->servo.pwmPin, SERVO_ON_PULSE_LENGTH);
+                pwm.setPin(sfm->servo.pwmPin, SERVO_ON_PULSE_LENGTH_FAST);
                 noInterrupts();
-                sfm->servo.isOn = true;
+                sfm->servo.state = 2;
+                sfm->servo.targetRPM = SERVO_RPM_FAST;
             }
             else    // only update position after code has looped at least once
             {
-                sfm->servo.position = (sfm->servo.position + SERVO_DELTA_OMEGA) % COUNTS_PER_REV;
-                debug++;
+                sfm->servo.position = (sfm->servo.position + SERVO_DELTA_OMEGA_FAST) % COUNTS_PER_REV;
             }
         }
         // check for HE falling edge
@@ -172,7 +206,6 @@ void setup() {
   TCCR1B |= B00000010; // /8 prescalar
   TIMSK1 |= B00000010; // enable CMPA interrupt
   OCR1A = 10000; // interrupt when timer reaches 10000 ticks
-
   sei(); // enable interrupts
 
   Serial.begin(9600);
@@ -234,10 +267,10 @@ void GetNewMessage() {
 void loop() {
   // put your main code here, to run repeatedly:
   GetNewMessage();
-  Serial.println(sfModules[8].servo.position);
-  Serial.println(sfModules[8].servo.targetPosition);
-  Serial.println(sfModules[8].servo.isOn);
-  Serial.println(SERVO_DELTA_OMEGA);
+  // Serial.println(sfModules[0].servo.position);
+  // Serial.println(sfModules[0].servo.targetPosition);
+  // Serial.println(sfModules[0].servo.isOn);
+  Serial.println(SERVO_DELTA_OMEGA_FAST);
   delay(1000);
 }
 
